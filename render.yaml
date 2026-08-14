@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: winbid-ai-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn main:app --workers 2 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false   # You'll set this in Render dashboard
+      - key: API_SECRET
+        value: winbid_secret_2026
