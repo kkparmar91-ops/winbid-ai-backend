@@ -37,7 +37,78 @@ API_SECRET     = os.environ.get('API_SECRET', 'winbid_secret_2026')
 print(f"✅ Gemini key: {'configured (' + GEMINI_API_KEY[:10] + '...)' if GEMINI_API_KEY else 'NOT SET'}")
 
 # Gemini REST API URL (no SDK needed)
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+# AI Provider URLs
+GEMINI_URL      = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+GROQ_URL        = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_URL  = "https://openrouter.ai/api/v1/chat/completions"
+
+# API Keys from environment
+GROQ_API_KEY        = os.environ.get('GROQ_API_KEY', '')
+OPENROUTER_API_KEY  = os.environ.get('OPENROUTER_API_KEY', '')
+
+def call_ai(prompt):
+    """Try all available AI providers in order"""
+
+    # 1. OpenRouter (free, no credit card, 20+ models)
+    if OPENROUTER_API_KEY:
+        try:
+            r = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://winbid.dureka.co.in",
+                    "X-Title": "WinBid"
+                },
+                json={
+                    "model": "meta-llama/llama-3.1-8b-instruct:free",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2048
+                },
+                timeout=60
+            )
+            print(f"OpenRouter: HTTP {r.status_code}")
+            if r.status_code == 200:
+                text = r.json()['choices'][0]['message']['content']
+                print("✅ OpenRouter succeeded")
+                return text
+            print(f"OpenRouter error: {r.text[:200]}")
+        except Exception as e:
+            print(f"OpenRouter failed: {e}")
+
+    # 2. Groq (free tier)
+    if GROQ_API_KEY:
+        try:
+            r = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}], "max_tokens": 2048},
+                timeout=60
+            )
+            print(f"Groq: HTTP {r.status_code}")
+            if r.status_code == 200:
+                return r.json()['choices'][0]['message']['content']
+            print(f"Groq error: {r.text[:200]}")
+        except Exception as e:
+            print(f"Groq failed: {e}")
+
+    # 3. Gemini fallback
+    if GEMINI_API_KEY:
+        try:
+            key = GEMINI_API_KEY
+            r = requests.post(
+                f"{GEMINI_URL}?key={key}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}},
+                timeout=90
+            )
+            if r.status_code == 200:
+                return r.json()['candidates'][0]['content']['parts'][0]['text']
+        except Exception as e:
+            print(f"Gemini failed: {e}")
+
+    return None
 
 # ── Auth decorator ─────────────────────────────────────────────────────────────
 def require_secret(f):
@@ -65,34 +136,39 @@ def health():
 
 @app.route('/debug', methods=['GET'])
 def debug():
-    """Show config and test Gemini key directly - no auth needed"""
+    """Show config and test all auth methods"""
     key = GEMINI_API_KEY
     result = {
         'key_set': bool(key),
-        'key_preview': (key[:10] + '...' + key[-4:]) if len(key) > 14 else key,
+        'key_preview': (key[:6] + '...' + key[-4:]) if len(key) > 10 else key,
         'key_length': len(key),
-        'key_starts_with': key[:4] if key else 'EMPTY',
-        'api_secret_set': bool(API_SECRET),
+        'key_starts_with': key[:5] if key else 'EMPTY',
     }
 
-    # Test the key live
-    if key:
-        try:
-            r = requests.post(
-                f"{GEMINI_URL}?key={key}",
-                json={"contents": [{"parts": [{"text": "say: OK"}]}],
-                      "generationConfig": {"maxOutputTokens": 10}},
-                timeout=15
-            )
-            result['gemini_http_code'] = r.status_code
-            result['gemini_response']  = r.text[:300]
-            result['gemini_working']   = r.status_code == 200
-        except Exception as e:
-            result['gemini_error'] = str(e)
-    else:
-        result['gemini_working'] = False
-        result['gemini_error']   = 'No API key set'
+    # Test all 3 methods
+    methods = [
+        ('query_param',    f"{GEMINI_URL}?key={key}", {}),
+        ('bearer_token',   GEMINI_URL, {"Authorization": f"Bearer {key}"}),
+        ('x-goog-api-key', GEMINI_URL, {"x-goog-api-key": key}),
+    ]
 
+    results = {}
+    body = {"contents": [{"parts": [{"text": "say: OK"}]}],
+            "generationConfig": {"maxOutputTokens": 10}}
+
+    for name, url, extra_headers in methods:
+        try:
+            headers = {"Content-Type": "application/json", **extra_headers}
+            r = requests.post(url, headers=headers, json=body, timeout=15)
+            results[name] = {
+                'http_code': r.status_code,
+                'working': r.status_code == 200,
+                'response': r.text[:150]
+            }
+        except Exception as e:
+            results[name] = {'error': str(e)}
+
+    result['auth_methods'] = results
     return jsonify(result)
 
 
@@ -229,9 +305,8 @@ def extract_pdf_text(pdf_path):
 
 
 def extract_with_gemini(raw_text):
-    """Call Gemini REST API directly - no SDK needed"""
+    """Extract tender info using any available AI provider"""
     text = raw_text[:100000]
-
     prompt = f"""You are an expert tender analysis AI. Extract key information from this tender document.
 
 Return ONLY a valid JSON object with these keys (null if not found):
@@ -252,49 +327,21 @@ Return ONLY a valid JSON object with these keys (null if not found):
   "contact_info": "Contact details",
   "ai_summary": "3-sentence executive summary"
 }}
-
 TENDER TEXT:
 {text}
-
 Return ONLY the JSON. No markdown, no explanation."""
 
     try:
-        resp = requests.post(
-            f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "maxOutputTokens": 2048,
-                    "temperature": 0.2
-                }
-            },
-            timeout=90
-        )
-
-        if resp.status_code != 200:
-            print(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
-            # Return the actual error so we can debug
-            try:
-                err_data = resp.json()
-                err_msg = err_data.get('error', {}).get('message', resp.text[:200])
-            except:
-                err_msg = resp.text[:200]
-            raise Exception(f"Gemini HTTP {resp.status_code}: {err_msg}")
-
-        data     = resp.json()
-        ai_text  = data['candidates'][0]['content']['parts'][0]['text'].strip()
-
-        # Strip markdown if present
+        ai_text = call_ai(prompt)
+        if not ai_text:
+            raise Exception("All AI providers failed")
         ai_text = re.sub(r'```json\s*', '', ai_text)
-        ai_text = re.sub(r'```\s*',     '', ai_text).strip()
-
+        ai_text = re.sub(r'```\s*', '', ai_text).strip()
         return json.loads(ai_text)
-
     except json.JSONDecodeError as e:
-        print(f"JSON parse error: {e}")
         raise Exception(f"JSON parse failed: {e}")
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"AI error: {e}")
         raise
 
 
