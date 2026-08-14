@@ -63,6 +63,39 @@ def health():
     })
 
 
+@app.route('/debug', methods=['GET'])
+def debug():
+    """Show config and test Gemini key directly - no auth needed"""
+    key = GEMINI_API_KEY
+    result = {
+        'key_set': bool(key),
+        'key_preview': (key[:10] + '...' + key[-4:]) if len(key) > 14 else key,
+        'key_length': len(key),
+        'key_starts_with': key[:4] if key else 'EMPTY',
+        'api_secret_set': bool(API_SECRET),
+    }
+
+    # Test the key live
+    if key:
+        try:
+            r = requests.post(
+                f"{GEMINI_URL}?key={key}",
+                json={"contents": [{"parts": [{"text": "say: OK"}]}],
+                      "generationConfig": {"maxOutputTokens": 10}},
+                timeout=15
+            )
+            result['gemini_http_code'] = r.status_code
+            result['gemini_response']  = r.text[:300]
+            result['gemini_working']   = r.status_code == 200
+        except Exception as e:
+            result['gemini_error'] = str(e)
+    else:
+        result['gemini_working'] = False
+        result['gemini_error']   = 'No API key set'
+
+    return jsonify(result)
+
+
 @app.route('/test_text', methods=['POST'])
 @require_secret
 def test_text():
@@ -70,18 +103,17 @@ def test_text():
     sample = """
     NOTICE INVITING TENDER - NIT No. PWD/2026/1234
     Construction of 4-Lane Bridge over River Yamuna, Pune Maharashtra
-    Estimated Cost: Rs. 15,50,00,000
-    EMD: Rs. 15,50,000
-    Last Date: 15th September 2026
-    Opening Date: 16th September 2026
+    Estimated Cost: Rs. 15,50,00,000. EMD: Rs. 15,50,000
+    Last Date: 15th September 2026. Opening Date: 16th September 2026
     Department: Public Works Department, Maharashtra
-    Eligibility: Min 2 similar projects, turnover Rs 20 crore
-    Contact: ee.pwd@gov.in, 022-12345678
     """
-    extracted = extract_with_gemini(sample)
-    if extracted:
-        return jsonify({'success': True, 'data': extracted})
-    return jsonify({'success': False, 'error': 'AI extraction failed'}), 500
+    try:
+        extracted = extract_with_gemini(sample)
+        if extracted:
+            return jsonify({'success': True, 'data': extracted})
+        return jsonify({'success': False, 'error': 'AI returned None'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/extract', methods=['POST'])
@@ -240,8 +272,14 @@ Return ONLY the JSON. No markdown, no explanation."""
         )
 
         if resp.status_code != 200:
-            print(f"Gemini API error {resp.status_code}: {resp.text[:300]}")
-            return None
+            print(f"Gemini API error {resp.status_code}: {resp.text[:500]}")
+            # Return the actual error so we can debug
+            try:
+                err_data = resp.json()
+                err_msg = err_data.get('error', {}).get('message', resp.text[:200])
+            except:
+                err_msg = resp.text[:200]
+            raise Exception(f"Gemini HTTP {resp.status_code}: {err_msg}")
 
         data     = resp.json()
         ai_text  = data['candidates'][0]['content']['parts'][0]['text'].strip()
@@ -254,10 +292,10 @@ Return ONLY the JSON. No markdown, no explanation."""
 
     except json.JSONDecodeError as e:
         print(f"JSON parse error: {e}")
-        return None
+        raise Exception(f"JSON parse failed: {e}")
     except Exception as e:
         print(f"Gemini error: {e}")
-        return None
+        raise
 
 
 if __name__ == '__main__':
