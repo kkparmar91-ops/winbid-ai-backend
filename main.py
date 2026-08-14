@@ -63,6 +63,27 @@ def health():
     })
 
 
+@app.route('/test_text', methods=['POST'])
+@require_secret
+def test_text():
+    """Test AI with hardcoded sample text - no PDF needed"""
+    sample = """
+    NOTICE INVITING TENDER - NIT No. PWD/2026/1234
+    Construction of 4-Lane Bridge over River Yamuna, Pune Maharashtra
+    Estimated Cost: Rs. 15,50,00,000
+    EMD: Rs. 15,50,000
+    Last Date: 15th September 2026
+    Opening Date: 16th September 2026
+    Department: Public Works Department, Maharashtra
+    Eligibility: Min 2 similar projects, turnover Rs 20 crore
+    Contact: ee.pwd@gov.in, 022-12345678
+    """
+    extracted = extract_with_gemini(sample)
+    if extracted:
+        return jsonify({'success': True, 'data': extracted})
+    return jsonify({'success': False, 'error': 'AI extraction failed'}), 500
+
+
 @app.route('/extract', methods=['POST'])
 @require_secret
 def extract_tender():
